@@ -1,0 +1,161 @@
+name: Deploy static content to Pages
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - closed
+      - reopened
+      - labeled
+      - unlabeled
+  issue_comment:
+    types:
+      - created
+      - edited
+      - deleted
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - .github/scripts/**
+      - .github/workflows/generate_site.yml
+  workflow_dispatch:
+
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+  contents: read
+  issues: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+      id-token: write
+      pages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPOSITORY_NAME: ${{ github.event.repository.name }}
+      BLOG_TITLE: "${{ github.repository_owner }}'s Blog"
+      OG_CJK_FONT_DIR: .cache/fonts
+      PUBLIC_OG_IMAGE_VERSION: ${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Resolve GitHub Pages URL
+        run: |
+          site_url="https://${REPO_OWNER}.github.io"
+          if [ "$REPOSITORY_NAME" != "${REPO_OWNER}.github.io" ]; then
+            site_url="${site_url}/${REPOSITORY_NAME}"
+          fi
+          echo "BASE_URL=$site_url" >> "$GITHUB_ENV"
+      - name: Checkout isite
+        uses: actions/checkout@v7
+        with:
+          repository: yihong0618/isite
+          ref: 9daf44c760384cebcb4aa0914ad586d75490e90f
+          path: .isite
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: .isite/go.mod
+          cache-dependency-path: .isite/go.sum
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Build isite
+        working-directory: .isite
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/isite" ./cmd/isite
+      - name: Resolve AstroPaper revision
+        id: astro-paper
+        run: |
+          revision="$(git ls-remote https://github.com/satnaing/astro-paper.git refs/heads/main | cut -f1)"
+          test -n "$revision"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Cache AstroPaper theme
+        id: cache-astro-paper
+        uses: actions/cache@v5
+        with:
+          path: .cache/astro-paper
+          key: astro-paper-${{ steps.astro-paper.outputs.revision }}
+      - name: Download AstroPaper theme
+        if: steps.cache-astro-paper.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 https://github.com/satnaing/astro-paper.git .cache/astro-paper
+      - name: Cache CJK OG font
+        id: cache-og-font
+        uses: actions/cache@v5
+        with:
+          path: .cache/fonts
+          key: noto-sans-cjk-sc-static-2c76254f-b5f0d1a1
+      - name: Download CJK OG font
+        if: steps.cache-og-font.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache/fonts
+          curl --fail --location --silent --show-error --retry 4 --retry-all-errors \
+            --output "$OG_CJK_FONT_DIR/NotoSansCJKsc-Regular.otf" \
+            'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf'
+          curl --fail --location --silent --show-error --retry 4 --retry-all-errors \
+            --output "$OG_CJK_FONT_DIR/NotoSansCJKsc-Bold.otf" \
+            'https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf'
+      - name: Verify CJK OG font
+        run: |
+          echo '2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b  .cache/fonts/NotoSansCJKsc-Regular.otf' \
+            | sha256sum --check
+          echo 'b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a  .cache/fonts/NotoSansCJKsc-Bold.otf' \
+            | sha256sum --check
+      - name: Generate Astro site
+        run: |
+          cp -R .cache/astro-paper output
+          find output/src/content/posts -type f -delete
+          "$RUNNER_TEMP/isite" generate \
+            --engine astro \
+            --user "$REPO_OWNER" \
+            --repo "$REPOSITORY_NAME" \
+            --output output \
+            --title "$BLOG_TITLE" \
+            --base-url "$BASE_URL" \
+            --feed
+      - name: Cache npm downloads
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('output/package.json') }}
+          restore-keys: npm-${{ runner.os }}-
+      - name: Customize and build Astro site
+        run: |
+          node .github/scripts/customize_astro.mjs
+          npm install --prefix output --no-audit --no-fund
+          npm run build --prefix output
+          test -s output/dist/rss.xml
+          node .github/scripts/check_rss_stability.mjs \
+            output/dist/rss.xml \
+            "$BASE_URL" \
+            "${{ github.event.issue.number }}"
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          name: pages-artifact
+          path: output/dist
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+        with:
+          artifact_name: pages-artifact
