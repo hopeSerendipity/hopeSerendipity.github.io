@@ -1,4 +1,3 @@
-import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 
 const headerPath =
   process.argv[2] ?? "output/src/components/Header.astro";
@@ -88,12 +87,14 @@ const generatedCommentsHeading =
   /\n## Comments\n(?=\n### [^\n]+\n\n\[View comment\]\()/;
 const githubCommentsHeading = "\n## Comments from GitHub issue\n";
 let customizedCommentSections = 0;
+let sawGeneratedCommentLink = false;
 
 for (const entry of await readdir(postsPath, { withFileTypes: true })) {
   if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
 
   const postPath = `${postsPath}/${entry.name}`;
   const post = await readFile(postPath, "utf8");
+  sawGeneratedCommentLink ||= post.includes("[View comment](");
   const customizedPost = post.replace(
     generatedCommentsHeading,
     githubCommentsHeading,
@@ -104,8 +105,12 @@ for (const entry of await readdir(postsPath, { withFileTypes: true })) {
   customizedCommentSections += 1;
 }
 
-if (customizedCommentSections === 0) {
+if (customizedCommentSections === 0 && sawGeneratedCommentLink) {
   throw new Error(`Could not find any generated comment sections in ${postsPath}`);
+}
+
+if (customizedCommentSections === 0) {
+  console.log("No GitHub issue comments to customize");
 }
 
 function replaceExactly(source, pattern, replacement, description, path) {
