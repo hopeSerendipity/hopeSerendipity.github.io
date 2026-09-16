@@ -1,3 +1,4 @@
+import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 
 const headerPath =
   process.argv[2] ?? "output/src/components/Header.astro";
